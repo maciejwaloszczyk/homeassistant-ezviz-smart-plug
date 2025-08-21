@@ -1,0 +1,32 @@
+{
+  "title": "Matthias AI Agent (OpenAI-compatible)",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Skonfiguruj Matthias AI Agent",
+        "description": "Podaj dane dostępu do endpointu OpenAI-kompatybilnego",
+        "data": {
+          "api_key": "API Key",
+          "base_url": "Base URL",
+          "model": "Model",
+          "max_history": "Max historia",
+          "system_prompt": "System prompt"
+        }
+      }
+    },
+    "error": {
+      "missing_required": "Wypełnij wymagane pola"
+    }
+  }
+  ,
+  "options": {
+    "step": {
+      "init": {
+        "title": "Opcje Matthias AI Agent",
+        "data": {
+          "system_prompt": "System prompt"
+        }
+      }
+    }
+  }
+}

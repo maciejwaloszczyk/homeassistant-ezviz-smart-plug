@@ -1,6 +1,5 @@
 {
-  "name": "EZVIZ Smart Plug",
-  "hacs": "2.0.5",
-  "homeassistant": "2025.7.4",
-  "render_readme": true
+  "name": "Matthias AI Agent",
+  "render_readme": true,
+  "hide_default_branch": true
 }
