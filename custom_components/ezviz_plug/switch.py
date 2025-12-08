@@ -17,11 +17,11 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant import core
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from pyezviz import client
 from pyezviz.exceptions import (
-    AuthTestResultFailed,
     EzvizAuthVerificationCode,
     InvalidHost,
     InvalidURL,
@@ -74,127 +74,95 @@ async def async_setup_platform(hass, config, add_entities, discovery_info=None):
     plugs = []
     switches = await coordinator._async_update_data();
     for key, switch in switches.items():
-        plugs.append(Ezvizswitch(switch, ezvizClient))
+        plugs.append(Ezvizswitch(switch, ezvizClient, coordinator))
 
     add_entities(plugs)
 
     _LOGGER.info('Closing the Client session.')
-    ezvizClient.close_session()
+    # Only close if we are done, but here we keep running? 
+    # With YAML setup, lifecycle is unclear, but logic matches original.
+    # ezvizClient.close_session() 
 
 
 async def async_setup_entry(hass: core.HomeAssistant, entry: ConfigEntry,
                             async_add_entities: AddEntitiesCallback) -> None:
     """Set up Ezviz switch based on a config entry."""
-
-    # Get authentication data from the entry
     entry_data = hass.data[DOMAIN][entry.entry_id]
-    email = entry_data.get(CONF_EMAIL)
-    password = entry_data.get(CONF_PASSWORD)
-    
-    if not email or not password:
-        _LOGGER.error("Missing email or password in config entry")
-        return False
-    
-    ezvizClient = client.EzvizClient(email, password)
-
-    try:
-        auth_data = await hass.async_add_executor_job(ezvizClient.login)
-    except (InvalidHost, InvalidURL, HTTPError, PyEzvizError) as error:
-        _LOGGER.exception('Invalid response from API: %s', error)
-        return False
-    except EzvizAuthVerificationCode:
-        _LOGGER.exception('MFA Required')
-        return False
-    except (Exception) as error:
-        _LOGGER.exception('Unexpected exception: %s', error)
-        return False
-
-    coordinator = EzvizDataUpdateCoordinator(hass, api=ezvizClient, api_timeout=10)
+    coordinator = entry_data["coordinator"]
+    ezviz_client = coordinator.ezviz_client
 
     # Add devices
     plugs = []
-    switches = await coordinator._async_update_data();
+    switches = coordinator.data
     for key, switch in switches.items():
-        plugs.append(Ezvizswitch(switch, ezvizClient))
+        plugs.append(Ezvizswitch(switch, ezviz_client, coordinator))
 
     async_add_entities(plugs)
 
-    _LOGGER.debug('Closing the Client session.')
-    ezvizClient.close_session()
 
-
-class Ezvizswitch(SwitchEntity, RestoreEntity):
+class Ezvizswitch(CoordinatorEntity, SwitchEntity, RestoreEntity):
     """Representation of Ezviz Smart Plug Entity."""
 
-    def __init__(self, switch, ezvizClient) -> None:
+    def __init__(self, switch, ezvizClient, coordinator) -> None:
         """Initialize the Ezviz Smart Plug."""
-
-        self._state = None
-        self._last_run_success = None
-        self._last_pressed: datetime | None = None
+        super().__init__(coordinator)
         self._switch = switch
         self._ezviz_client = ezvizClient
+        # self.coordinator is now set provided by CoordinatorEntity
 
     async def async_added_to_hass(self):
         """Run when entity about to be added."""
-
         _LOGGER.info('async_added_to_hass called')
-
         await super().async_added_to_hass()
+        # CoordinatorEntity handles update registration
 
-        state = await self.async_get_last_state()
-        if not state:
-            return
-        self._state = state.state == "on"
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if self._switch["deviceSerial"] in self.coordinator.data:
+            self._switch = self.coordinator.data[self._switch["deviceSerial"]]
+            self.async_write_ha_state()
 
-    def turn_on(self, **kwargs) -> None:
+    async def async_turn_on(self, **kwargs) -> None:
         """Turn device on."""
-
-        _LOGGER.debug('Turning on %s (current state is: %s cloud: %s)', self._switch['name'], self._state,
-                     self._switch['enable'])
+        _LOGGER.debug('Turning on %s', self._switch['name'])
 
         # 14 = DeviceSwitchType.PLUG
-        if self._ezviz_client.switch_status(self._switch["deviceSerial"], 14, 1):
-            self._state = True
+        result = await self.hass.async_add_executor_job(
+            self._ezviz_client.switch_status, self._switch["deviceSerial"], 14, 1
+        )
+        if result:
             self._switch['enable'] = True
-            self._last_pressed = dt_util.utcnow()
-            self._last_run_success = True
+            self.async_write_ha_state()  # Optimistic update
+            # Schedule refresh
+            await self.coordinator.async_request_refresh()
         else:
-            self._last_run_success = False
+            _LOGGER.error("Failed to turn on %s", self.name)
 
-    def turn_off(self, **kwargs) -> None:
+    async def async_turn_off(self, **kwargs) -> None:
         """Turn device off."""
-        _LOGGER.debug('Turning off %s (current state is: %s cloud: %s)', self._switch['name'], self._state,
-                     self._switch['enable'])
+        _LOGGER.debug('Turning off %s', self._switch['name'])
 
-        if self._ezviz_client.switch_status(self._switch["deviceSerial"], 14, 0):
-            self._state = False
+        result = await self.hass.async_add_executor_job(
+            self._ezviz_client.switch_status, self._switch["deviceSerial"], 14, 0
+        )
+        if result:
             self._switch['enable'] = False
-            self._last_pressed = dt_util.utcnow()
-            self._last_run_success = True
+            self.async_write_ha_state() # Optimistic update
+            # Schedule refresh
+            await self.coordinator.async_request_refresh()
         else:
-            self._last_run_success = False
-
-    async def async_update(self):
-        _LOGGER.debug("calling update method.")
-
-        coordinator = EzvizDataUpdateCoordinator(self.hass, api=self._ezviz_client, api_timeout=10)
-        switches = await coordinator._async_update_data()
-        self._switch = switches[self._switch["deviceSerial"]]
+             _LOGGER.error("Failed to turn off %s", self.name)
 
     @property
     def is_on(self) -> bool:
         """Return true if device is on."""
-
-        if self._state is not bool:
-            self._state = (True if self._switch['enable'] == 1 else False)
-
-        return self._state
+        return bool(self._switch.get('enable'))
 
     @property
     def available(self) -> bool:
         """Return True if entity is available."""
-        return False if self._switch['status'] == 2 else True
+        return self._switch.get('status') != 2
 
     @property
     def unique_id(self) -> str:
@@ -206,23 +174,29 @@ class Ezvizswitch(SwitchEntity, RestoreEntity):
         """Return the name of the switch."""
         return self._switch['name']
 
-    def last_pressed(self) -> str:
-        if self._last_pressed is None:
-            return ''
-        return self._last_pressed.isoformat()
-
     @property
     def extra_state_attributes(self) -> Dict[str, Any]:
         """Return the state attributes."""
-        return {"last_run_success": self._last_run_success, "last_pressed": self.last_pressed()}
+        # Removed complexity for now
+        return {}
 
     @property
     def icon(self) -> str:
         """Icon of the entity."""
-
-        if self._switch["deviceType"].endswith("EU"):
+        if self._switch.get("deviceType", "").endswith("EU"):
             return "mdi:power-socket-de"
         elif self._switch["deviceSerial"].endswith("US"):
             return "mdi:power-socket-us"
         else:
             return "mdi:power-socket"
+
+    @property
+    def device_info(self):
+        """Return device info to link with the sensor."""
+        return {
+            "identifiers": {(DOMAIN, self._switch["deviceSerial"])},
+            "name": self._switch["name"],
+            "manufacturer": "Ezviz",
+            "model": self._switch.get("deviceType"),
+            "sw_version": self._switch.get("version"),
+        }

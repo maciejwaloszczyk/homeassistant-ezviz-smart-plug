@@ -21,7 +21,7 @@ class EzvizDataUpdateCoordinator(DataUpdateCoordinator):
         """Initialize global Ezviz data updater."""
         self.ezviz_client = api
         self._api_timeout = api_timeout
-        update_interval = timedelta(seconds=30)
+        update_interval = timedelta(seconds=15)
 
         super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=update_interval)
 
@@ -31,11 +31,28 @@ class EzvizDataUpdateCoordinator(DataUpdateCoordinator):
         plugs = {}
         switches = self.ezviz_client._api_get_pagelist(page_filter="SWITCH")
         for device in switches['deviceInfos']:
+            is_plug = False
             for entity in switches['SWITCH'][device['deviceSerial']]:
                 if int(entity['type']) is int(14):
                     device['enable'] = entity['enable']
+                    is_plug = True
 
-            if device["deviceSerial"].startswith("Q"):
+            if is_plug:
+                try:
+                    # Fetch power data
+                    url = f"https://{self.ezviz_client._token['api_url']}/v3/smarthome/outlet/v1/info/op"
+                    res = self.ezviz_client._session.get(
+                        url,
+                        params={"deviceSerial": device['deviceSerial']},
+                        timeout=5
+                    )
+                    res.raise_for_status()
+                    power_json = res.json()
+                    if power_json.get("meta", {}).get("code") == 200:
+                        device["power"] = power_json.get("power")
+                except Exception as error:
+                    _LOGGER.warning("Could not fetch power for %s: %s", device['deviceSerial'], error)
+
                 plugs[device['deviceSerial']] = device
 
         return plugs
